@@ -81,3 +81,32 @@ if uploaded_file:
 
 else:
     st.warning("Por favor, sube un archivo PDF para comenzar el análisis.")
+
+
+import io
+
+# ... (dentro de tu bloque 'if uploaded_file:')
+
+st.subheader("📋 Detalle de Transacciones")
+
+# Aquí usamos el DataFrame con los datos extraídos
+# (Asegúrate de que 'df_ejemplo' contenga todos los datos procesados)
+st.dataframe(df_ejemplo, use_container_width=True)
+
+# --- LÓGICA PARA DESCARGAR EXCEL ---
+
+# 1. Creamos un buffer en memoria
+buffer = io.BytesIO()
+
+# 2. Escribimos el DataFrame en el buffer usando ExcelWriter
+with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+    df_ejemplo.to_excel(writer, index=False, sheet_name='Transacciones')
+
+# 3. Creamos el botón de descarga
+st.download_button(
+    label="📥 Descargar detalle en Excel",
+    data=buffer.getvalue(),
+    file_name=f"analisis_tarjeta_{datos['cierre'].replace('/','-')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
