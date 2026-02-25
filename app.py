@@ -4,142 +4,174 @@ import pandas as pd
 import re
 import io
 
-st.set_page_config(page_title="ICBC Pro Analyzer", layout="wide", page_icon="💳")
+st.set_page_config(page_title="Analizador ICBC Pro", layout="wide", page_icon="💳")
 
-# Estilos para que las tablas y métricas se vean impecables
+# Estilo para las métricas y el diseño de tablas
 st.markdown("""
     <style>
-    [data-testid="stMetricValue"] { font-size: 20px; }
-    .main .block-container { padding-top: 2rem; }
-    th { background-color: #f0f2f6 !important; }
+    [data-testid="stMetricValue"] { font-size: 20px; color: #1E3A8A; }
+    .stDataFrame { border: 1px solid #e6e9ef; border-radius: 5px; }
+    h3 { margin-bottom: 0.5rem; }
     </style>
     """, unsafe_allow_html=True)
 
-def extraer_datos_completos(pdf_file):
+def procesar_resumen_icbc(pdf_file):
     texto_completo = ""
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
             texto_completo += page.extract_text() + "\n"
     
-    # 1. BUSCADOR DE CABECERA
-    def buscar(patron, texto):
-        m = re.search(patron, texto, re.DOTALL | re.IGNORECASE)
+    # --- 1. DATOS DE CABECERA ---
+    def buscar_dato(patron, texto):
+        m = re.search(patron, texto, re.MULTILINE | re.IGNORECASE)
         return m.group(1).strip() if m else "0,00"
 
-    datos = {
+    # Captura de Saldos Anteriores (Pesos y Dólares)
+    # Buscamos la línea de SALDO ANTERIOR y tomamos los dos montos
+    match_saldos = re.search(r"SALDO ANTERIOR\s+([\d\.,]+)\s+([\d\.,]+)", texto_completo)
+    s_pesos = match_saldos.group(1) if match_saldos else "0,00"
+    s_dolares = match_saldos.group(2) if match_saldos else "0,00"
+
+    cabecera = {
         "titular": "JORGE EDUARDO OLMOS",
-        "cierre": buscar(r"CIERRE ACTUAL:\n\n(\d{2}/\d{2}/\d{4})", texto_completo),
-        "vencimiento": buscar(r"VENCIMIENTO ACTUAL:\n\n(\d{2}/\d{2}/\d{4})", texto_completo),
-        "saldo_ant_pesos": buscar(r"SALDO ANTERIOR\s+([\d\.,]+)\s+[\d\.,]+", texto_completo),
-        "saldo_ant_dolares": buscar(r"SALDO ANTERIOR\s+[\d\.,]+\s+([\d\.,]+)", texto_completo),
+        "cierre": buscar_dato(r"CIERRE ACTUAL:\n(\d{2}/\d{2}/\d{4})", texto_completo),
+        "vencimiento": buscar_dato(r"VENCIMIENTO ACTUAL:\n(\d{2}/\d{2}/\d{4})", texto_completo),
+        "saldo_ant_pesos": s_pesos,
+        "saldo_ant_dolares": s_dolares
     }
 
-    # 2. PAGOS Y SEGMENTACIÓN
+    # --- 2. PAGOS ---
     pagos_raw = re.findall(r"SU PAGO EN PESOS.*?([\d\.,]+)-", texto_completo)
     total_pagos = sum([float(p.replace('.', '').replace(',', '.')) for p in pagos_raw])
 
-    # 3. EXTRACCIÓN POR TARJETAS E IMPUESTOS
-    bloques = re.split(r"(TOTAL TARJETA XXXX XXXX XXXX \d{4})", texto_completo)
+    # --- 3. SEGMENTACIÓN POR TARJETAS E IMPUESTOS ---
+    # Dividimos el texto por los totales de tarjeta
+    patron_total = r"(TOTAL TARJETA XXXX XXXX XXXX \d{4})"
+    partes = re.split(patron_total, texto_completo)
     
-    dict_tarjetas = {}
-    texto_impuestos = texto_completo # Por defecto buscamos en todo, pero refinaremos
+    tablas_tarjetas = {}
+    ultimo_idx = 0
     
-    for i in range(1, len(bloques), 2):
-        id_tarjeta = bloques[i].split()[-1] # Toma los últimos 4 dígitos
-        contenido = bloques[i-1]
+    # Recorremos los bloques encontrados
+    for i in range(1, len(partes), 2):
+        label_tarjeta = partes[i].split()[-1] # Los 4 dígitos finales
+        bloque_gastos = partes[i-1] # Lo que está ANTES del total
         
-        # Regex para TODOS los consumos (Fecha | Detalle | Cuota Opcional | Monto)
-        # Filtra para que no agarre los que terminan en "-" (pagos)
-        patron_todo = r"(\d{2}/\d{2}/\d{2})\s+([A-Z0-9\s\.\*\/]+?)\s+(?:C\.(\d{2}/\d{2}))?\s+([\d\.,]+)(?!\-)"
-        matches = re.findall(patron_todo, contenido)
+        # Regex para capturar consumos (Fecha | Detalle | Monto)
+        # Incluye letras, números, asteriscos, barras y espacios
+        patron_item = r"(\d{2}/\d{2}/\d{2})\s+([A-Z0-9\s\.\*\/%()-]+?)\s+([\d\.,]+)(?!\-)"
+        items = re.findall(patron_item, bloque_gastos)
         
-        movs = []
-        for m in matches:
-            if any(x in m[1] for x in ["IVA", "IMP.", "PERCEP", "RETEN", "SELLOS"]): continue
-            movs.append({
-                "Fecha": m[0],
-                "Detalle": m[1].strip(),
-                "Cuota": m[2] if m[2] else "Un solo pago",
-                "Monto": float(m[3].replace('.', '').replace(',', '.'))
+        df_temp = []
+        for it in items:
+            # Filtrar si es un impuesto o palabra de sistema
+            if any(x in it[1] for x in ["IVA", "IIBB", "DB.RG", "PERCEP", "SELLOS", "FECHA"]): continue
+            df_temp.append({
+                "Fecha": it[0],
+                "Detalle": it[1].strip(),
+                "Monto ($)": float(it[2].replace('.', '').replace(',', '.'))
             })
-        if movs: dict_tarjetas[id_tarjeta] = pd.DataFrame(movs)
+        
+        if df_temp:
+            tablas_tarjetas[label_tarjeta] = pd.DataFrame(df_temp)
+        ultimo_idx = i
 
-    # 4. EXTRACCIÓN DE IMPUESTOS
-    # Buscamos términos fiscales después de la última tarjeta
-    patron_impuestos = r"(\d{2}/\d{2}/\d{2})\s+(IVA|IMP|PERCEP|RG\s\d+|SELLOS|LEY|TASA).*?\s+([\d\.,]+)"
-    imp_matches = re.findall(patron_impuestos, texto_completo, re.IGNORECASE)
+    # --- 4. EXTRACCIÓN DE IMPUESTOS ---
+    # Buscamos en el bloque que queda después de la última tarjeta
+    resto_texto = partes[ultimo_idx + 1] if (ultimo_idx + 1) < len(partes) else texto_completo
     
-    lista_imp = []
+    # Palabras clave de impuestos solicitadas
+    keywords_imp = ["IIBB", "IVA RG", "DB.RG", "PERCEP", "SELLOS", "LEY", "TASA"]
+    regex_imp = r"(\d{2}/\d{2}/\d{2})\s+(" + "|".join(keywords_imp) + r".*?)\s+([\d\.,]+)"
+    
+    imp_matches = re.findall(regex_imp, resto_texto, re.IGNORECASE)
+    df_imp = []
     for im in imp_matches:
-        lista_imp.append({
+        df_imp.append({
             "Fecha": im[0],
-            "Concepto": im[1].strip() + " " + "Fiscal",
-            "Monto": float(im[2].replace('.', '').replace(',', '.'))
+            "Impuesto": im[1].strip(),
+            "Monto ($)": float(im[2].replace('.', '').replace(',', '.'))
         })
-    df_impuestos = pd.DataFrame(lista_imp).drop_duplicates()
+    
+    df_impuestos = pd.DataFrame(df_imp).drop_duplicates()
 
-    return datos, total_pagos, dict_tarjetas, df_impuestos
+    return cabecera, total_pagos, tablas_tarjetas, df_impuestos
 
-# --- INTERFAZ ---
-st.title("💳 Dashboard Financiero ICBC")
+# --- INTERFAZ STREAMLIT ---
+st.title("💳 Analizador de Gastos ICBC")
 
 archivo = st.file_uploader("Sube tu resumen PDF", type="pdf")
 
 if archivo:
-    datos, total_p, tarjetas, df_imp = extraer_datos_completos(archivo)
+    try:
+        datos, pagos, tarjetas, impuestos = procesar_resumen_icbc(archivo)
 
-    # SIDEBAR
-    with st.sidebar:
-        st.header("👤 Titular")
-        st.write(datos['titular'])
-        st.divider()
-        st.metric("Saldo Anterior $", f"$ {datos['saldo_ant_pesos']}")
-        st.metric("Saldo Anterior u$s", f"u$s {datos['saldo_ant_dolares']}")
-        st.divider()
-        st.metric("PAGOS RECIBIDOS", f"$ {total_p:,.2f}")
+        # SIDEBAR CON MÉTRICAS
+        with st.sidebar:
+            st.header("📌 Resumen General")
+            st.info(f"**Titular:** {datos['titular']}")
+            st.write(f"📅 Cierre: {datos['cierre']}")
+            st.write(f"📅 Vto: {datos['vencimiento']}")
+            st.divider()
+            
+            st.subheader("Saldos Anteriores")
+            st.metric("Saldo Anterior ($)", f"$ {datos['saldo_ant_pesos']}")
+            st.metric("Saldo Anterior (u$s)", f"u$s {datos['saldo_ant_dolares']}")
+            
+            st.divider()
+            st.subheader("Pagos Realizados")
+            st.metric("SU PAGO EN PESOS", f"$ {pagos:,.2f}", delta="Recibido")
 
-    # CUERPO PRINCIPAL - 3 COLUMNAS
-    st.subheader(f"Resumen al {datos['cierre']} - Vencimiento: {datos['vencimiento']}")
-    
-    col1, col2, col3 = st.columns(3)
+        # CUERPO PRINCIPAL: 3 COLUMNAS EN PARALELO
+        st.subheader(f"Desglose de la Liquidación - Cierre {datos['cierre']}")
+        
+        col1, col2, col3 = st.columns(3)
 
-    # Columna 1: Tarjeta Principal
-    with col1:
-        id1 = list(tarjetas.keys())[0] if tarjetas else "N/A"
-        st.markdown(f"### 💳 Tarjeta ...{id1}")
-        if id1 in tarjetas:
-            st.dataframe(tarjetas[id1], hide_index=True, use_container_width=True)
-            st.metric("Subtotal", f"$ {tarjetas[id1]['Monto'].sum():,.2f}")
+        # Columna 1: Tarjeta 2448
+        with col1:
+            id1 = "2448" # Puedes hacerlo dinámico con list(tarjetas.keys())[0]
+            st.markdown(f"### 💳 Tarjeta ...{id1}")
+            if id1 in tarjetas:
+                st.dataframe(tarjetas[id1], use_container_width=True, hide_index=True)
+                st.metric("Subtotal", f"$ {tarjetas[id1]['Monto ($)'].sum():,.2f}")
+            else:
+                st.warning(f"No se hallaron datos para {id1}")
 
-    # Columna 2: Tarjeta Adicional
-    with col2:
-        id2 = list(tarjetas.keys())[1] if len(tarjetas) > 1 else None
-        if id2:
+        # Columna 2: Tarjeta 6600
+        with col2:
+            id2 = "6600"
             st.markdown(f"### 💳 Tarjeta ...{id2}")
-            st.dataframe(tarjetas[id2], hide_index=True, use_container_width=True)
-            st.metric("Subtotal", f"$ {tarjetas[id2]['Monto'].sum():,.2f}")
-        else:
-            st.info("No se detectó segunda tarjeta.")
+            if id2 in tarjetas:
+                st.dataframe(tarjetas[id2], use_container_width=True, hide_index=True)
+                st.metric("Subtotal", f"$ {tarjetas[id2]['Monto ($)'].sum():,.2f}")
+            else:
+                st.warning(f"No se hallaron datos para {id2}")
 
-    # Columna 3: Impuestos
-    with col3:
-        st.markdown("### 🏦 Impuestos y Tasas")
-        if not df_imp.empty:
-            st.dataframe(df_imp, hide_index=True, use_container_width=True)
-            st.metric("Total Impuestos", f"$ {df_imp['Monto'].sum():,.2f}", delta_color="inverse")
-        else:
-            st.write("No se detectaron impuestos desglosados.")
+        # Columna 3: Impuestos
+        with col3:
+            st.markdown("### 🏦 Impuestos y Tasas")
+            if not impuestos.empty:
+                st.dataframe(impuestos, use_container_width=True, hide_index=True)
+                st.metric("Total Impuestos", f"$ {impuestos['Monto ($)'].sum():,.2f}")
+            else:
+                st.info("No se detectaron impuestos.")
 
-    # Botón Global de Excel
-    st.divider()
-    if st.button("🚀 Preparar descarga consolidada"):
+        # BOTÓN DE EXCEL CONSOLIDADO
+        st.divider()
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine='openpyxl') as writer:
             for k, v in tarjetas.items():
                 v.to_excel(writer, sheet_name=f"Tarjeta_{k}", index=False)
-            df_imp.to_excel(writer, sheet_name="Impuestos", index=False)
+            impuestos.to_excel(writer, sheet_name="Impuestos", index=False)
         
-        st.download_button("📥 Descargar Excel con todas las pestañas", buf.getvalue(), "Resumen_Completo.xlsx")
+        st.download_button(
+            label="📥 Descargar Reporte Completo (Excel)",
+            data=buf.getvalue(),
+            file_name=f"Resumen_ICBC_{datos['cierre'].replace('/','-')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
-else:
-    st.info("Esperando PDF para procesar las 3 tablas en paralelo...")
+    except Exception as e:
+        st.error(f"Error al procesar el archivo: {e}")
+
