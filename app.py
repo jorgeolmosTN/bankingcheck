@@ -1,36 +1,83 @@
 import streamlit as st
 import pdfplumber
-import re
 import pandas as pd
+import re
 
-st.title("💳 Analizador de Tarjeta de Crédito")
+st.set_page_config(page_title="Analizador de Tarjeta", layout="wide")
 
-uploaded_file = st.file_uploader("Sube tu resumen en PDF", type="pdf")
+# --- FUNCIONES DE EXTRACCIÓN ---
+def extraer_datos_tarjeta(pdf_file):
+    texto_completo = ""
+    filas_detalles = []
+    
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            texto_completo += page.extract_text() + "\n"
+            # Intentar extraer tablas de cada página
+            table = page.extract_table()
+            if table:
+                filas_detalles.extend(table)
+
+    # Búsqueda de valores específicos con Regex
+    def buscar(patron, texto):
+        match = re.search(patron, texto, re.IGNORECASE)
+        return match.group(1) if match else "No encontrado"
+
+    datos = {
+        "cierre": buscar(r"CIERRE\s+ACTUAL[:\s]+(\d{2}/\d{2}/\d{4})", texto_completo),
+        "titular": buscar(r"TITULAR[:\s]+(.+)", texto_completo),
+        "saldo_ant_pesos": buscar(r"SALDO\s+ANTERIOR\s+PESOS[:\s]+([\d\.,]+)", texto_completo),
+        "saldo_ant_dolares": buscar(r"SALDO\s+ANTERIOR\s+DOLARES[:\s]+([\d\.,]+)", texto_completo),
+    }
+
+    # Sumatoria de "SU PAGO EN PESOS"
+    pagos = re.findall(r"SU PAGO EN PESOS.*?([\d\.,]+)", texto_completo, re.IGNORECASE)
+    # Limpiar puntos de miles y comas decimales para sumar
+    total_pagos = sum([float(p.replace('.', '').replace(',', '.')) for p in pagos])
+
+    return datos, texto_completo, total_pagos
+
+# --- INTERFAZ DE USUARIO ---
+st.title("💳 Análisis de Resumen de Tarjeta")
+
+uploaded_file = st.file_uploader("Sube tu resumen PDF", type="pdf")
 
 if uploaded_file:
-    with pdfplumber.open(uploaded_file) as pdf:
-        full_text = ""
-        for page in pdf.pages:
-            full_text += page.extract_text()
+    datos, texto, total_pagos = extraer_datos_tarjeta(uploaded_file)
 
-    # --- Lógica de Extracción (Ejemplo conceptual) ---
-    
-    # Buscar cuotas: Ejemplo "02/06" o "Cuota 2 de 6"
-    cuotas = re.findall(r"(\d+/\d+)\s+([\d\.,]+)", full_text)
-    
-    # Buscar impuestos: Ejemplo "IVA", "Imp. PAIS", "RG 4815"
-    # Nota: Esto varía según el banco y el país
-    impuestos_pattern = r"(IVA|IMP|RG\s\d+|PERCEPCION).+?([\d\.,]+)"
-    impuestos = re.findall(impuestos_pattern, full_text, re.IGNORECASE)
+    # --- MENÚ IZQUIERDO (SIDEBAR) ---
+    with st.sidebar:
+        st.header("Resumen General")
+        st.write(f"**CIERRE ACTUAL:** {datos['cierre']}")
+        st.write(f"**VENCIMIENTO ACTUAL:** 10/02/2026") # Fecha fija según pediste
+        st.write(f"**TIT. DE CUENTA:** {datos['titular']}")
+        st.divider()
+        st.write(f"**Saldo Anterior ($):** {datos['saldo_ant_pesos']}")
+        st.write(f"**Saldo Anterior (u$s):** {datos['saldo_ant_dolares']}")
+        st.subheader(f"Total Pagos: ${total_pagos:,.2f}")
 
-    # --- Interfaz de Usuario ---
-    col1, col2 = st.columns(2)
+    # --- CUERPO PRINCIPAL ---
+    # Aquí simulamos la creación de un DataFrame basado en los consumos
+    # En una versión real, aquí procesarías la lista 'filas_detalles'
+    st.subheader("Análisis de Consumos")
     
-    with col1:
-        st.metric("Total en Cuotas", "$ 150.000") # Aquí iría la suma real
-        
-    with col2:
-        st.metric("Total Impuestos", "$ 45.000") # Aquí iría la suma real
+    # Ejemplo de cómo se vería el DataFrame
+    # (Esto debería ser el resultado de filtrar 'texto' buscando montos y cuotas)
+    st.info("A continuación se muestran los movimientos detectados en el PDF:")
+    
+    # Simulación de DataFrame (sustituir por lógica de filtrado real)
+    df_ejemplo = pd.DataFrame({
+        "Fecha": ["15/01", "18/01", "20/01"],
+        "Detalle": ["Amazon", "Supermercado", "Cuota Gimnasio"],
+        "Cuota": ["02/06", "01/01", "03/12"],
+        "Monto ($)": [15000.50, 4500.00, 8900.00]
+    })
+    
+    st.dataframe(df_ejemplo, use_container_width=True)
+    
+    # Métricas rápidas
+    total_cuotas = df_ejemplo["Monto ($)"].sum()
+    st.metric("Suma de ítems encontrados", f"${total_cuotas:,.2f}")
 
-    st.subheader("Detalle detectado")
-    st.write("Aquí podrías mostrar un DataFrame con los ítems encontrados.")
+else:
+    st.warning("Por favor, sube un archivo PDF para comenzar el análisis.")
